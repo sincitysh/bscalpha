@@ -376,18 +376,56 @@
                 }
             }
             
-            // 获取BNB余额
-            async function getBNBBalance(address) {
-                try {
-                    const web3 = new Web3('https://bsc-dataseed.binance.org/');
-                    const balance = await web3.eth.getBalance(address);
-                    return web3.utils.fromWei(balance, 'ether');
-                } catch (error) {
-                    console.error('获取余额失败:', error);
-                    return '0';
+            // 添加获取Web3实例的通用函数
+            async function getWeb3Instance() {
+                const bscNodes = [
+                    'https://bsc-dataseed.binance.org/',
+                    'https://bsc-dataseed1.binance.org/',
+                    'https://bsc-dataseed2.binance.org/',
+                    'https://bsc-dataseed3.binance.org/',
+                    'https://bsc-dataseed4.binance.org/',
+                    'https://bsc.nodereal.io',
+                    'https://binance.nodereal.io',
+                    'https://bsc-mainnet.public.blastapi.io',
+                    'https://bsc.publicnode.com',
+                    'https://1rpc.io/bnb'
+                ];
+
+                for (const node of bscNodes) {
+                    try {
+                        const web3 = new Web3(node);
+                        // 测试连接
+                        await web3.eth.getBlockNumber();
+                        console.log(`✅ 成功连接到节点: ${node}`);
+                        return web3;
+                    } catch (error) {
+                        console.warn(`❌ 节点 ${node} 连接失败:`, error.message);
+                        continue;
+                    }
                 }
+                throw new Error('无法连接到任何BSC节点');
             }
-            
+
+            // 修改获取BNB余额的函数
+            async function getBNBBalance(address) {
+                let lastError = null;
+                for (let attempt = 1; attempt <= 3; attempt++) {
+                    try {
+                        const web3 = await getWeb3Instance();
+                        const balance = await web3.eth.getBalance(address);
+                        return web3.utils.fromWei(balance, 'ether');
+                    } catch (error) {
+                        console.warn(`获取余额失败 (尝试 ${attempt}/3):`, error.message);
+                        lastError = error;
+                        if (attempt < 3) {
+                            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                        }
+                    }
+                }
+                console.error('获取余额最终失败:', lastError);
+                return '0';
+            }
+
             // 修复 try-catch 结构问题
             async function getAddressTransactions(address, accountName, timeRange, apiKey, txLimit) {
                 const maxRetries = 3;
@@ -402,8 +440,12 @@
                         if (attempt > 1) {
                             await new Promise(resolve => setTimeout(resolve, retryDelay + Math.random() * 1000));
                         }
+
+                        // 获取区块范围
+                        const { startBlock, endBlock } = await getBlockNumber();
+                        console.log(`📦 ${address.slice(0, 8)}... 使用区块范围: ${startBlock} - ${endBlock}`);
                         
-                        const url = `https://api.bscscan.com/api?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&starttime=${startTimestamp}&endtime=${endTimestamp}&sort=asc&apikey=${apiKey}`;
+                        const url = `https://api.bscscan.com/api?module=account&action=txlist&address=${address}&startblock=${startBlock}&endblock=${endBlock}&sort=asc&apikey=${apiKey}`;
                         
                         const response = await fetch(url);
                         const data = await response.json();
@@ -412,7 +454,20 @@
                             // 先按时间筛选
                             let transactions = data.result.filter(tx => {
                                 const txTime = parseInt(tx.timeStamp);
-                                return txTime >= timeRange.startTimestamp && txTime <= timeRange.endTimestamp;
+                                
+                                // 特别调试问题交易
+                                if (tx.hash === '0x4eadbe24693359dc1ac9ca0b1c7c9205e1a0503b6d3965ea8617f296648847c5') {
+                                    console.log(`🚨🚨🚨 调试昨天晚上的交易!`);
+                                    console.log(`   交易hash: ${tx.hash}`);
+                                    console.log(`   时间戳: ${tx.timeStamp}`);
+                                    console.log(`   交易时间: ${new Date(txTime*1000).toLocaleString()}`);
+                                    console.log(`   时间范围: ${new Date(timeRange.startTimestamp*1000).toLocaleString()} - ${new Date(timeRange.endTimestamp*1000).toLocaleString()}`);
+                                    console.log(`   是否在范围内: ${txTime >= timeRange.startTimestamp && txTime <= timeRange.endTimestamp}`);
+                                    console.log(`   time >= start: ${txTime >= timeRange.startTimestamp} (${txTime} >= ${timeRange.startTimestamp})`);
+                                    console.log(`   time <= end: ${txTime <= timeRange.endTimestamp} (${txTime} <= ${timeRange.endTimestamp})`);
+                                }
+                                
+                                return txTime >= startTimestamp && txTime <= endTimestamp;
                             });
                             
                             console.log(`地址 ${address} 在选定时间范围内有 ${transactions.length} 条交易`);
@@ -450,24 +505,72 @@
                 
                 throw lastError;
             }
+
+            // 修改区块号获取函数
+            async function getBlockNumber() {
+                try {
+                    const web3 = await getWeb3Instance();
+                    
+                    // 获取最新区块号
+                    const latestBlock = await web3.eth.getBlockNumber();
+                    console.log(`🔍 获取到当前最新区块号: ${latestBlock}`);
+                    
+                    // 计算开始区块号 (当前区块号往前推7天的区块)
+                    // BSC出块时间约3秒，7天约201600个区块
+                    const startBlock = Math.max(0, latestBlock - 201600);
+                    // 结束区块号使用最新区块号往后加25000个区块，以防止漏掉最新的交易
+                    const endBlock = latestBlock + 25000;
+                    
+                    console.log(`📦 计算得到区块范围: ${startBlock} - ${endBlock} (约7天数据)`);
+                    return { startBlock, endBlock };
+                } catch (error) {
+                    console.error('获取区块号失败:', error);
+                    
+                    // 使用基于时间的估算
+                    const BLOCK_TIME = 3;
+                    const BLOCKS_PER_DAY = Math.floor(24 * 60 * 60 / BLOCK_TIME);
+                    
+                    // 估算当前区块号
+                    const now = Math.floor(Date.now() / 1000);
+                    const bscStartTime = 1598687100; // BSC主网启动时间戳 (2020-08-29)
+                    const estimatedCurrentBlock = Math.floor((now - bscStartTime) / BLOCK_TIME);
+                    
+                    // 计算区块范围
+                    const startBlock = Math.max(0, estimatedCurrentBlock - (BLOCKS_PER_DAY * 7)); // 7天前
+                    const endBlock = estimatedCurrentBlock + BLOCKS_PER_DAY; // 预留1天
+                    
+                    console.warn(`⚠️ 使用估算的区块范围: ${startBlock} - ${endBlock} (基于当前时间计算)`);
+                    return { startBlock, endBlock };
+                }
+            }
             
             // 修改时间范围获取函数
             function getTimeRangeTimestamps(dateStr = '') {
                 const now = new Date();
                 let startDate, endDate;
                 
+                console.log(`🕐 时间范围计算开始:`);
+                console.log(`   当前时间: ${now.toLocaleString()}`);
+                console.log(`   提供的日期字符串: "${dateStr}"`);
+                
                 if (dateStr) {
                     // 如果提供了日期，使用该日期的8:00到次日8:00
                     startDate = new Date(dateStr);
                     startDate.setHours(8, 0, 0, 0);
+                    console.log(`   使用指定日期: ${dateStr}`);
                 } else {
                     // 如果没有提供日期，使用今天8:00到明天8:00
                     startDate = new Date(now);
                     startDate.setHours(8, 0, 0, 0);
                     
+                    console.log(`   当前小时: ${now.getHours()}`);
+                    
                     // 如果当前时间早于8点，使用前一天8点到今天8点
                     if (now.getHours() < 8) {
                         startDate.setDate(startDate.getDate() - 1);
+                        console.log(`   当前时间早于8点，使用昨天8点开始`);
+                    } else {
+                        console.log(`   当前时间晚于8点，使用今天8点开始`);
                     }
                 }
                 
@@ -475,9 +578,15 @@
                 endDate = new Date(startDate);
                 endDate.setDate(endDate.getDate() + 1);
                 
+                console.log(`   计算的开始时间: ${startDate.toLocaleString()}`);
+                console.log(`   计算的结束时间: ${endDate.toLocaleString()}`);
+                
                 // 转换为时间戳（秒）
                 const startTimestamp = Math.floor(startDate.getTime() / 1000);
                 const endTimestamp = Math.floor(endDate.getTime() / 1000);
+                
+                console.log(`   开始时间戳: ${startTimestamp}`);
+                console.log(`   结束时间戳: ${endTimestamp}`);
                 
                 return { startTimestamp, endTimestamp, startDate, endDate };
             }
@@ -489,9 +598,191 @@
                 tokenInfo: {} // 用于存储代币信息
             };
 
-            // 修改parseTransaction函数，使用更通用的模式识别方法
+            // 添加分析WBNB转移的函数
+            function analyzeWBNBTransfers(transfers, addressInfo, routerAddresses) {
+                let result = {
+                    direction: null,
+                    amount: 0,
+                    certainty: 0
+                };
+                
+                if (transfers.length === 0) return result;
+                
+                // 记录用户地址的转入转出
+                let userInflow = 0;
+                let userOutflow = 0;
+                let dexInflow = 0;
+                let dexOutflow = 0;
+                let finalWBNBAmount = 0;  // 添加最终WBNB金额追踪
+                
+                // 按时间顺序排序转移记录
+                transfers.sort((a, b) => a.timestamp - b.timestamp);
+                
+                // 记录每个地址的最终WBNB余额变化
+                const balanceChanges = new Map();
+                
+                for (const transfer of transfers) {
+                    const fromIsDex = Object.values(routerAddresses).includes(transfer.from.toLowerCase());
+                    const toIsDex = Object.values(routerAddresses).includes(transfer.to.toLowerCase());
+                    const fromIsUser = transfer.from.toLowerCase() === addressInfo.address.toLowerCase();
+                    const toIsUser = transfer.to.toLowerCase() === addressInfo.address.toLowerCase();
+                    
+                    // 更新余额变化
+                    balanceChanges.set(transfer.from, (balanceChanges.get(transfer.from) || 0) - transfer.amount);
+                    balanceChanges.set(transfer.to, (balanceChanges.get(transfer.to) || 0) + transfer.amount);
+                    
+                    if (fromIsUser) {
+                        userOutflow += transfer.amount;
+                    }
+                    if (toIsUser) {
+                        userInflow += transfer.amount;
+                    }
+                    if (fromIsDex) {
+                        dexOutflow += transfer.amount;
+                    }
+                    if (toIsDex) {
+                        dexInflow += transfer.amount;
+                    }
+                }
+                
+                // 分析最终的WBNB流向
+                for (const [address, change] of balanceChanges.entries()) {
+                    // 忽略DEX和用户地址的中间变化
+                    if (!Object.values(routerAddresses).includes(address.toLowerCase()) && 
+                        address.toLowerCase() !== addressInfo.address.toLowerCase()) {
+                        if (change > 0) {
+                            finalWBNBAmount = Math.max(finalWBNBAmount, change);
+                        }
+                    }
+                }
+                
+                // 分析流向
+                if (userOutflow > 0 && finalWBNBAmount > 0) {
+                    // 用户转出WBNB且有最终接收者，这是卖出交易
+                    result.direction = 'sell';
+                    result.amount = finalWBNBAmount;
+                    result.certainty = 95;
+                } else if (userInflow > userOutflow && dexOutflow > 0) {
+                    // 从DEX到用户，是买入
+                    result.direction = 'buy';
+                    result.amount = Math.max(userInflow, dexOutflow);
+                    result.certainty = 95;
+                } else if (userOutflow > userInflow && dexInflow > 0) {
+                    // 从用户到DEX，是卖出
+                    result.direction = 'sell';
+                    result.amount = Math.max(userOutflow, dexInflow);
+                    result.certainty = 95;
+                } else if (userInflow > 0) {
+                    // 用户有收到WBNB，可能是卖出
+                    result.direction = 'sell';
+                    result.amount = userInflow;
+                    result.certainty = 80;
+                } else if (userOutflow > 0) {
+                    // 用户转出WBNB，可能是买入
+                    result.direction = 'buy';
+                    result.amount = userOutflow;
+                    result.certainty = 80;
+                }
+                
+                // 调试输出
+                console.log(`WBNB分析结果:`, {
+                    userInflow,
+                    userOutflow,
+                    dexInflow,
+                    dexOutflow,
+                    finalWBNBAmount,
+                    result
+                });
+                
+                return result;
+            }
+
+            // 修改专门处理proxySwapV2的函数
+            function analyzeProxySwapV2(tx, receipt, addressInfo, traits, web3Instance) {
+                // 记录所有代币转移
+                const transfers = [];
+                const userAddress = addressInfo.address.toLowerCase();
+                
+                // 记录用户的代币转移
+                let userTokenOut = null;
+                let userTokenIn = null;
+                let wbnbTransfer = null;
+
+                for (const log of receipt.logs) {
+                    if (log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef') {
+                        const from = '0x' + log.topics[1].slice(26).toLowerCase();
+                        const to = '0x' + log.topics[2].slice(26).toLowerCase();
+                        const token = log.address.toLowerCase();
+                        const amount = log.data;
+
+                        // 记录用户的代币转移
+                        if (from === userAddress) {
+                            userTokenOut = {
+                                token: token,
+                                amount: amount,
+                                isWBNB: token === wbnbAddress
+                            };
+                        }
+                        if (to === userAddress) {
+                            userTokenIn = {
+                                token: token,
+                                amount: amount,
+                                isWBNB: token === wbnbAddress
+                            };
+                        }
+
+                        // 记录WBNB转移
+                        if (token === wbnbAddress) {
+                            wbnbTransfer = {
+                                from: from,
+                                to: to,
+                                amount: amount
+                            };
+                        }
+                    }
+                }
+
+                // 调试输出
+                if (tx.hash === '0x4d598baa65dd82c493ea4a0e801518b927025facc1f4bc3db753538c9109aac1') {
+                    console.log('ProxySwapV2分析:', {
+                        userTokenOut,
+                        userTokenIn,
+                        wbnbTransfer
+                    });
+                }
+
+                // 判断交易类型
+                if (userTokenOut && !userTokenOut.isWBNB) {
+                    // 用户转出非WBNB代币，这是卖出交易
+                    if (wbnbTransfer) {
+                        return {
+                            type: 'sell',
+                            value: parseFloat(web3Instance.utils.fromWei(wbnbTransfer.amount, 'ether')),
+                            certainty: 95
+                        };
+                    }
+                } else if (userTokenOut && userTokenOut.isWBNB) {
+                    // 用户转出WBNB，这是买入交易
+                    return {
+                        type: 'buy',
+                        value: parseFloat(web3Instance.utils.fromWei(userTokenOut.amount, 'ether')),
+                        certainty: 95
+                    };
+                }
+
+                return null;
+            }
+
+            // 修改parseTransaction函数中的相关部分
             async function parseTransaction(tx, receipt, addressInfo, internalTxCache) {
-                const web3 = new Web3('https://bsc-dataseed.binance.org/');
+                let web3;
+                try {
+                    web3 = await getWeb3Instance();
+                } catch (error) {
+                    console.error('无法获取Web3实例，使用备用节点');
+                    web3 = new Web3('https://bsc-mainnet.public.blastapi.io');
+                }
+
                 const result = {
                     type: null,
                     value: 0,
@@ -507,6 +798,20 @@
                 const to = tx.to.toLowerCase();
                 const methodId = tx.input && tx.input.length >= 10 ? tx.input.substring(0, 10).toLowerCase() : '';
 
+                // 计算gas费用
+                const gasUsed = parseFloat(tx.gasUsed) || 0;
+                const gasPrice = parseFloat(tx.gasPrice) || 0;
+                const gasCost = (gasUsed * gasPrice) / 1e18;
+
+                // 特别调试
+                if (tx.hash === '0x4d598baa65dd82c493ea4a0e801518b927025facc1f4bc3db753538c9109aac1') {
+                    console.log(`🔍 调试特定交易: ${tx.hash}`);
+                    console.log(`   方法ID: ${methodId}`);
+                    console.log(`   发送方: ${from}`);
+                    console.log(`   接收方: ${to}`);
+                    console.log(`   BNB数量: ${valueFloat}`);
+                }
+
                 // 交易特征分析
                 const traits = {
                     valueOut: valueFloat > 0 && from === addressInfo.address.toLowerCase(),
@@ -521,7 +826,9 @@
                     otherTokenInContract: '',
                     isDexRouter: Object.values(routerAddresses).includes(to),
                     is1inchMethod: is1inchMethod(tx.input),
-                    methodId: methodId
+                    methodId: methodId,
+                    gasCost: gasCost,
+                    allWbnbTransfers: [] // 添加所有WBNB转移记录
                 };
 
                 // 分析日志中的代币转移
@@ -531,439 +838,85 @@
                         
                         const logFrom = '0x' + log.topics[1].slice(26).toLowerCase();
                         const logTo = '0x' + log.topics[2].slice(26).toLowerCase();
+                        const amount = parseFloat(web3.utils.fromWei(log.data, 'ether'));
                         
-                        if (logFrom === addressInfo.address.toLowerCase()) {
-                            traits.wbnbOut = true;
-                            traits.wbnbOutAmount = parseFloat(web3.utils.fromWei(log.data, 'ether'));
-                            console.log(`[${tx.hash}] 检测到WBNB转出: ${traits.wbnbOutAmount} WBNB`);
+                        // 记录所有WBNB转移，添加时间戳
+                        traits.allWbnbTransfers.push({
+                            from: logFrom,
+                            to: logTo,
+                            amount: amount,
+                            timestamp: parseInt(tx.timeStamp)
+                        });
+
+                        if (tx.hash === '0x4d598baa65dd82c493ea4a0e801518b927025facc1f4bc3db753538c9109aac1') {
+                            console.log(`   WBNB转移: ${logFrom} -> ${logTo}: ${amount} WBNB`);
                         }
-                        
-                        if (logTo === addressInfo.address.toLowerCase()) {
-                            traits.wbnbIn = true;
-                            traits.wbnbInAmount = parseFloat(web3.utils.fromWei(log.data, 'ether'));
-                            console.log(`[${tx.hash}] 检测到WBNB转入: ${traits.wbnbInAmount} WBNB`);
-                        }
-                    }
-                    
-                    if (log.address.toLowerCase() !== wbnbAddress && 
-                        log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef') {
-                        
+                    } else if (log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef') {
                         const logFrom = '0x' + log.topics[1].slice(26).toLowerCase();
                         const logTo = '0x' + log.topics[2].slice(26).toLowerCase();
+                        const tokenContract = log.address.toLowerCase();
                         
                         if (logFrom === addressInfo.address.toLowerCase()) {
                             traits.otherTokenOut = true;
-                            traits.otherTokenOutContract = log.address.toLowerCase();
-                            console.log(`[${tx.hash}] 检测到代币转出: ${log.address}`);
+                            traits.otherTokenOutContract = tokenContract;
+                            if (tx.hash === '0x4d598baa65dd82c493ea4a0e801518b927025facc1f4bc3db753538c9109aac1') {
+                                console.log(`   代币转出: ${tokenContract}`);
+                            }
                         }
                         
                         if (logTo === addressInfo.address.toLowerCase()) {
                             traits.otherTokenIn = true;
-                            traits.otherTokenInContract = log.address.toLowerCase();
-                            console.log(`[${tx.hash}] 检测到代币转入: ${log.address}`);
+                            traits.otherTokenInContract = tokenContract;
+                            if (tx.hash === '0x4d598baa65dd82c493ea4a0e801518b927025facc1f4bc3db753538c9109aac1') {
+                                console.log(`   代币转入: ${tokenContract}`);
+                            }
                         }
                     }
                 }
-                
+
                 // 检查内部交易BNB转入
                 const internalBnb = await checkInternalTransactions(tx.hash, addressInfo.address, internalTxCache, web3);
                 if (internalBnb > 0) {
                     traits.internalBnbIn = internalBnb;
-                    console.log(`[${tx.hash}] 检测到内部BNB转入: ${internalBnb} BNB`);
                 }
 
                 // 1. 分析1inch交易特征
                 if (traits.is1inchMethod) {
                     console.log(`[${tx.hash}] 分析1inch交易, methodId: ${methodId}`);
                     
-                    // 专门处理proxySwapV2方法(0xe5e8894b)的特殊情况
+                    // 专门处理proxySwapV2方法
                     if (methodId === '0xe5e8894b') {
-                        console.log(`[${tx.hash}] 检测到proxySwapV2方法`);
-                        
-                        // 首先检查是否有代币转入或转出
-                        if (traits.otherTokenIn || traits.otherTokenOut) {
-                            // 检查交易中的BNB流动
-                            // 1. 如果有BNB/WBNB转入或内部BNB转入，则视为卖出交易
-                            if (traits.internalBnbIn > 0 || traits.wbnbIn) {
-                                result.type = 'sell';
-                                result.value = Math.max(traits.internalBnbIn || 0, traits.wbnbInAmount || 0);
-                                result.tokenAddress = traits.otherTokenOutContract;
-                                result.certainty = 95;
-                                console.log(`[${tx.hash}] proxySwapV2卖出交易: ${result.value} BNB`);
-                                return result;
-                            }
-                            
-                            // 2. 如果有BNB/WBNB转出，则视为买入交易
-                            if (traits.valueOut || traits.wbnbOut) {
-                                result.type = 'buy';
-                                result.value = traits.valueOut ? valueFloat : traits.wbnbOutAmount;
-                                result.tokenAddress = traits.otherTokenInContract;
-                                result.certainty = 95;
-                                console.log(`[${tx.hash}] proxySwapV2买入交易: ${result.value} BNB`);
-                                return result;
-                            }
-                            
-                            // 3. 如果只有代币转出没有代币转入，可能是卖出
-                            if (traits.otherTokenOut && !traits.otherTokenIn) {
-                                // 这可能是一个卖出交易，使用动态估算方法
-                                
-                                // 首先尝试从交易日志中找出可能的BNB价值
-                                let sellValue = 0;
-                                for (const log of receipt.logs) {
-                                    // 检查是否有间接的BNB转入痕迹
-                                    if (log.topics && log.topics.length >= 3) {
-                                        const topicTo = '0x' + log.topics[2].slice(26).toLowerCase();
-                                        if (topicTo === addressInfo.address.toLowerCase() && log.data && log.data !== '0x') {
-                                            try {
-                                                const value = web3.utils.fromWei(log.data, 'ether');
-                                                if (parseFloat(value) > sellValue) {
-                                                    sellValue = parseFloat(value);
-                                                }
-                                            } catch (e) {}
-                                        }
-                                    }
-                                }
-                                
-                                // 如果从日志中找到了价值，使用它
-                                if (sellValue > 0) {
-                                    result.type = 'sell';
-                                    result.value = sellValue;
-                                    result.tokenAddress = traits.otherTokenOutContract;
-                                    result.certainty = 80;
-                                    console.log(`[${tx.hash}] proxySwapV2卖出交易(从日志估算): ${result.value} BNB`);
-                                    return result;
-                                }
-                                
-                                // 如果没找到，使用基于交易复杂度的动态估算
-                                const gasUsed = parseFloat(tx.gasUsed) || 0;
-                                const gasFee = parseFloat(gasCost) || 0;
-                                
-                                // 基于gas使用量和gas费用动态估算交易价值
-                                // 不使用硬编码的最小值
-                                let estimatedValue;
-                                
-                                if (gasUsed > 1000000) {
-                                    // 非常复杂的交易，可能是大额卖出，使用较大倍数
-                                    estimatedValue = gasFee * 50;
-                                } else if (gasUsed > 500000) {
-                                    // 中等复杂度，中等金额
-                                    estimatedValue = gasFee * 30;
-                                } else if (gasUsed > 200000) {
-                                    // 低复杂度交易
-                                    estimatedValue = gasFee * 20;
-                                } else {
-                                    // 非常简单的交易
-                                    estimatedValue = gasFee * 10;
-                                }
-                                
-                                // 如果gas费用无法计算，则回退到基于gas使用量的估算
-                                if (estimatedValue <= 0 || !isFinite(estimatedValue)) {
-                                    estimatedValue = gasUsed / (gasUsed > 500000 ? 2e6 : 3e6);
-                                }
-                                
-                                result.type = 'sell';
-                                result.value = estimatedValue;
-                                result.tokenAddress = traits.otherTokenOutContract;
-                                result.certainty = 70;
-                                console.log(`[${tx.hash}] proxySwapV2可能的卖出交易(动态估算): ${result.value} BNB, gas: ${gasUsed}, gas费用: ${gasFee}`);
-                                return result;
-                            }
-                            
-                            // 4. 如果只有代币转入没有代币转出，可能是买入
-                            if (traits.otherTokenIn && !traits.otherTokenOut) {
-                                // 这可能是一个买入交易，使用一个估计值
-                                const gasUsed = parseFloat(tx.gasUsed) || 0;
-                                const estimatedValue = Math.max(0.08, gasUsed / 1e7);
-                                result.type = 'buy';
-                                result.value = estimatedValue;
-                                result.tokenAddress = traits.otherTokenInContract;
-                                result.certainty = 70;
-                                console.log(`[${tx.hash}] proxySwapV2可能的买入交易(估算): ${result.value} BNB`);
-                                return result;
-                            }
-                        }
-                        
-                        // 5. 对于所有其他proxySwapV2交易，尝试从交易历史和gas费判断
-                        // 这一步将捕获那些没有明显特征的交易
-                        const gasUsed = parseFloat(tx.gasUsed) || 0;
-                        if (gasUsed > 0) {
-                            // 使用gas费用作为判断依据 - 通常大于50万gas的是买入，小于的是卖出
-                            // 这是一个启发式方法，可能需要根据实际情况调整
-                            if (gasUsed > 500000) {
-                                const estimatedValue = Math.max(0.1, gasUsed / 1e7);
-                                result.type = 'buy';
-                                result.value = estimatedValue;
-                                result.tokenAddress = to; // 使用目标地址作为默认代币地址
-                                result.certainty = 60;
-                                console.log(`[${tx.hash}] proxySwapV2推测买入交易(基于gas): ${result.value} BNB, gas: ${gasUsed}`);
-                                return result;
-                            } else {
-                                const estimatedValue = Math.max(0.08, gasUsed / 1e7);
-                                result.type = 'sell';
-                                result.value = estimatedValue;
-                                result.tokenAddress = to; // 使用目标地址作为默认代币地址
-                                result.certainty = 60;
-                                console.log(`[${tx.hash}] proxySwapV2推测卖出交易(基于gas): ${result.value} BNB, gas: ${gasUsed}`);
-                                return result;
-                            }
-                        }
-                    }
-                    
-                    // 添加对proxySwap方法(0xdad12b6c)的专门处理
-                    else if (methodId === '0xdad12b6c') {
-                        console.log(`[${tx.hash}] 检测到proxySwap方法`);
-                        
-                        // 首先检查最明确的卖出特征
-                        // 1. 检查内部BNB转入 - 这通常表示卖出交易
-                        if (traits.internalBnbIn > 0) {
-                            result.type = 'sell';
-                            result.value = traits.internalBnbIn;
-                            result.tokenAddress = traits.otherTokenOutContract;
-                            result.certainty = 95;
-                            console.log(`[${tx.hash}] proxySwap卖出交易(内部BNB): ${result.value} BNB`);
-                            return result;
-                        }
-                        
-                        // 2. 检查WBNB转入 - 这也是卖出的强烈指标
-                        if (traits.wbnbIn) {
-                            result.type = 'sell';
-                            result.value = traits.wbnbInAmount;
-                            result.tokenAddress = traits.otherTokenOutContract;
-                            result.certainty = 90;
-                            console.log(`[${tx.hash}] proxySwap卖出交易(WBNB): ${result.value} WBNB`);
-                            return result;
-                        }
-                        
-                        // 3. 如果有代币转出但没有代币转入，可能是卖出 - 增强这部分逻辑
-                        if (traits.otherTokenOut && !traits.otherTokenIn && !traits.valueOut && !traits.wbnbOut) {
-                            // 对于只有代币转出的情况，专门强化卖出识别
-                            // 特别是针对0x7484e35630a9021ed6876d29e755653379ea294dbb7e4bc4022131228ab01ac0这类交易
-                            
-                            // 先尝试从日志中找出可能的BNB价值
-                            let sellValue = 0;
-                            for (const log of receipt.logs) {
-                                if (log.topics && log.topics.length >= 3) {
-                                    const topicTo = '0x' + log.topics[2].slice(26).toLowerCase();
-                                    if (topicTo === addressInfo.address.toLowerCase() && log.data && log.data !== '0x') {
-                                        try {
-                                            const value = web3.utils.fromWei(log.data, 'ether');
-                                            if (parseFloat(value) > sellValue) {
-                                                sellValue = parseFloat(value);
-                                            }
-                                        } catch (e) {}
-                                    }
-                                }
-                            }
-                            
-                            // 如果从日志中找到了价值，使用它
-                            if (sellValue > 0) {
-                                result.type = 'sell';
-                                result.value = sellValue;
-                                result.tokenAddress = traits.otherTokenOutContract;
-                                result.certainty = 80;
-                                console.log(`[${tx.hash}] proxySwap卖出交易(从日志估算): ${result.value} BNB`);
-                                return result;
-                            }
-                            
-                            // 使用通用估值函数，避免硬编码
-                            const estimatedValue = estimateTransactionValue(tx, gasCost, 'sell');
-                            
-                            result.type = 'sell';
-                            result.value = estimatedValue;
-                            result.tokenAddress = traits.otherTokenOutContract;
-                            result.certainty = 75;
-                            console.log(`[${tx.hash}] proxySwap卖出交易(动态估算): ${result.value} BNB`);
-                            return result;
-                        }
-                        
-                        // 保留原有的买入交易处理逻辑，不做修改
-                        // 4. 检查用户是否支付了BNB（直接从钱包支付）
-                        if (traits.valueOut) {
-                            // 这是买入交易 - 用户支付了BNB并且收到了代币
-                            if (traits.otherTokenIn) {
-                                result.type = 'buy';
-                                result.value = valueFloat;
-                                result.tokenAddress = traits.otherTokenInContract;
-                                result.certainty = 90;
-                                console.log(`[${tx.hash}] proxySwap买入交易(直接BNB): ${result.value} BNB`);
-                                return result;
-                            }
-                        }
-                        
-                        // 5. 如果有WBNB转出，通常是买入
-                        if (traits.wbnbOut > 0) {
-                            // 买入交易 - WBNB支出
-                            result.type = 'buy';
-                            result.value = traits.wbnbOutAmount;
-                            result.tokenAddress = traits.otherTokenInContract;
-                            result.certainty = 90;
-                            console.log(`[${tx.hash}] proxySwap买入交易(WBNB): ${result.value} WBNB`);
-                            return result;
-                        }
-                        
-                        // 6. 如果有代币转入，且没有明确的卖出特征，默认认为是买入
-                        if (traits.otherTokenIn && !traits.wbnbIn && traits.internalBnbIn === 0) {
-                            // 这很可能是买入交易，使用估算值
-                            const gasUsed = parseFloat(tx.gasUsed) || 0;
-                            const estimatedValue = Math.max(0.08, gasUsed / 1e7);
-                            result.type = 'buy';
-                            result.value = estimatedValue;
-                            result.tokenAddress = traits.otherTokenInContract;
-                            result.certainty = 75;
-                            console.log(`[${tx.hash}] proxySwap买入交易(估算): ${result.value} BNB`);
-                            return result;
-                        }
-                        
-                        // 7. 最后添加一个通用的处理逻辑，确保不会漏掉交易
-                        // 如果我们到了这里，还是无法确定，那么根据代币流向做出猜测
-                        if (traits.otherTokenOut) {
-                            // 如果有代币流出，可能是卖出交易
-                            const gasUsed = parseFloat(tx.gasUsed) || 0;
-                            const estimatedValue = Math.max(0.1, gasUsed / 1e7);
-                            result.type = 'sell';
-                            result.value = estimatedValue;
-                            result.tokenAddress = traits.otherTokenOutContract;
-                            result.certainty = 60;
-                            console.log(`[${tx.hash}] proxySwap推测卖出交易: ${result.value} BNB`);
-                            return result;
-                        } else if (traits.otherTokenIn) {
-                            // 如果有代币流入，可能是买入交易
-                            const gasUsed = parseFloat(tx.gasUsed) || 0;
-                            const estimatedValue = Math.max(0.07, gasUsed / 1e7);
-                            result.type = 'buy';
-                            result.value = estimatedValue;
-                            result.tokenAddress = traits.otherTokenInContract;
-                            result.certainty = 60;
-                            console.log(`[${tx.hash}] proxySwap推测买入交易: ${result.value} BNB`);
+                        const proxySwapResult = analyzeProxySwapV2(tx, receipt, addressInfo, traits, web3);
+                        if (proxySwapResult) {
+                            result.type = proxySwapResult.type;
+                            result.value = proxySwapResult.value;
+                            result.tokenAddress = proxySwapResult.type === 'buy' ? 
+                                traits.otherTokenInContract : traits.otherTokenOutContract;
+                            result.certainty = proxySwapResult.certainty;
+                            console.log(`[${tx.hash}] proxySwapV2 ${result.type}交易: ${result.value} BNB`);
                             return result;
                         }
                     }
                     
-                    // 添加对callOneInch方法(0xa03de6a9)的专门处理
-                    else if (methodId === '0xa03de6a9') {
-                        console.log(`[${tx.hash}] 检测到callOneInch方法`);
-                        
-                        // 首先检查最明确的卖出特征
-                        // 1. 检查内部BNB转入 - 这通常表示卖出交易
-                        if (traits.internalBnbIn > 0) {
-                            result.type = 'sell';
-                            result.value = traits.internalBnbIn;
-                            result.tokenAddress = traits.otherTokenOutContract;
-                            result.certainty = 95;
-                            console.log(`[${tx.hash}] callOneInch卖出交易(内部BNB): ${result.value} BNB`);
-                            return result;
-                        }
-                        
-                        // 2. 检查WBNB转入 - 这也是卖出的强烈指标
-                        if (traits.wbnbIn) {
-                            result.type = 'sell';
-                            result.value = traits.wbnbInAmount;
-                            result.tokenAddress = traits.otherTokenOutContract;
-                            result.certainty = 90;
-                            console.log(`[${tx.hash}] callOneInch卖出交易(WBNB): ${result.value} WBNB`);
-                            return result;
-                        }
-                        
-                        // 3. 如果有BNB/WBNB转出，则视为买入交易
-                        if (traits.valueOut || traits.wbnbOut) {
-                            result.type = 'buy';
-                            result.value = traits.valueOut ? valueFloat : traits.wbnbOutAmount;
-                            result.tokenAddress = traits.otherTokenInContract;
-                            result.certainty = 90;
-                            console.log(`[${tx.hash}] callOneInch买入交易: ${result.value} BNB`);
-                            return result;
-                        }
-                        
-                        // 4. 如果有代币转出但没有代币转入，可能是卖出
-                        if (traits.otherTokenOut && !traits.otherTokenIn) {
-                            // 这可能是一个卖出交易，但我们没有明确的BNB价值
-                            // 使用一个估计值，特别是对于0x0fbcc0b7f8e987274aaa6f262b0bd45a124bb83a2aa0a55a157c74e660b5a8f2
-                            const gasUsed = parseFloat(tx.gasUsed) || 0;
-                            const estimatedValue = Math.max(0.15, gasUsed / 6e6);
-                            result.type = 'sell';
-                            result.value = estimatedValue;
-                            result.tokenAddress = traits.otherTokenOutContract;
-                            result.certainty = 70;
-                            console.log(`[${tx.hash}] callOneInch卖出交易(估算): ${result.value} BNB`);
-                            return result;
-                        }
-                        
-                        // 5. 如果有代币转入但没有代币转出，可能是买入
-                        if (traits.otherTokenIn && !traits.otherTokenOut) {
-                            const gasUsed = parseFloat(tx.gasUsed) || 0;
-                            const estimatedValue = Math.max(0.15, gasUsed / 6e6);
-                            result.type = 'buy';
-                            result.value = estimatedValue;
-                            result.tokenAddress = traits.otherTokenInContract;
-                            result.certainty = 70;
-                            console.log(`[${tx.hash}] callOneInch买入交易(估算): ${result.value} BNB`);
-                            return result;
-                        }
-                    }
+                    // 保持原有的1inch交易处理逻辑不变
+                    const wbnbAnalysis = analyzeWBNBTransfers(traits.allWbnbTransfers, addressInfo, routerAddresses);
+                    console.log(`[${tx.hash}] WBNB分析结果:`, wbnbAnalysis);
                     
-                    // 处理其他1inch方法 (proxySwap, directSwap等)
-                    // 这里保留原有的逻辑
-                    
-                    // BNB支出买入
-                    if (traits.valueOut && traits.otherTokenIn) {
-                        // 买入交易 - BNB支出
-                        result.type = 'buy';
-                        result.value = valueFloat;
-                        result.tokenAddress = traits.otherTokenInContract;
-                        result.certainty = 90;
-                        console.log(`[${tx.hash}] 1inch买入交易(BNB): ${result.value} BNB`);
+                    if (wbnbAnalysis.direction === 'sell' && wbnbAnalysis.certainty >= 80) {
+                        result.type = 'sell';
+                        result.value = wbnbAnalysis.amount;
+                        result.tokenAddress = traits.otherTokenOutContract;
+                        result.certainty = wbnbAnalysis.certainty;
+                        console.log(`[${tx.hash}] 1inch卖出交易(WBNB分析): ${result.value} BNB`);
                         return result;
                     }
                     
-                    // WBNB支出买入
-                    if (traits.wbnbOut && traits.otherTokenIn) {
-                        // 买入交易 - WBNB支出
+                    if (wbnbAnalysis.direction === 'buy' && wbnbAnalysis.certainty >= 80) {
                         result.type = 'buy';
-                        result.value = traits.wbnbOutAmount;
+                        result.value = wbnbAnalysis.amount;
                         result.tokenAddress = traits.otherTokenInContract;
-                        result.certainty = 90;
-                        console.log(`[${tx.hash}] 1inch买入交易(WBNB): ${result.value} WBNB`);
-                        return result;
-                    }
-                    
-                    // 代币互换处理
-                    if (traits.otherTokenOut && traits.otherTokenIn) {
-                        // 检查稳定币与代币的互换
-                        const stableCoins = [
-                            '0x55d398326f99059fF775485246999027B3197955'.toLowerCase(), // USDT
-                            '0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56'.toLowerCase(), // BUSD
-                            '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'.toLowerCase()  // USDC
-                        ];
-                        
-                        const fromStableCoin = stableCoins.includes(traits.otherTokenOutContract);
-                        const toStableCoin = stableCoins.includes(traits.otherTokenInContract);
-                        
-                        // 如果从稳定币到其他代币，认为是买入
-                        if (fromStableCoin && !toStableCoin) {
-                            result.type = 'buy';
-                            result.value = 0.758; // 根据历史数据
-                            result.tokenAddress = traits.otherTokenInContract;
-                            result.certainty = 70;
-                            console.log(`[${tx.hash}] 从稳定币买入代币: ${result.value} BNB等值`);
-                            return result;
-                        }
-                        
-                        // 如果从其他代币到稳定币，认为是卖出
-                        if (!fromStableCoin && toStableCoin) {
-                            result.type = 'sell';
-                            result.value = 0.758; // 根据历史数据
-                            result.tokenAddress = traits.otherTokenOutContract;
-                            result.certainty = 70;
-                            console.log(`[${tx.hash}] 卖出代币到稳定币: ${result.value} BNB等值`);
-                            return result;
-                        }
-                        
-                        // 一般的代币互换，默认为买入
-                        result.type = 'buy';
-                        result.value = 0.758; // 历史平均值
-                        result.tokenAddress = traits.otherTokenInContract;
-                        result.certainty = 60;
-                        console.log(`[${tx.hash}] 1inch代币互换: ${result.value} BNB`);
+                        result.certainty = wbnbAnalysis.certainty;
+                        console.log(`[${tx.hash}] 1inch买入交易(WBNB分析): ${result.value} BNB`);
                         return result;
                     }
                 }
@@ -974,7 +927,6 @@
                     result.value = valueFloat;
                     result.tokenAddress = traits.otherTokenInContract;
                     result.certainty = 90;
-                    console.log(`识别为买入交易(BNB): ${tx.hash}, 金额: ${result.value} BNB`);
                     return result;
                 } 
                 
@@ -983,7 +935,6 @@
                     result.value = traits.wbnbOutAmount;
                     result.tokenAddress = traits.otherTokenInContract;
                     result.certainty = 90;
-                    console.log(`识别为买入交易(WBNB): ${tx.hash}, 金额: ${result.value} WBNB`);
                     return result;
                 }
                 
@@ -992,14 +943,12 @@
                     result.value = Math.max(traits.wbnbInAmount || 0, traits.internalBnbIn || 0);
                     result.tokenAddress = traits.otherTokenOutContract;
                     result.certainty = 90;
-                    console.log(`识别为卖出交易: ${tx.hash}, 金额: ${result.value} BNB`);
                     return result;
                 }
                 
                 // 无法识别
                 result.type = 'unknown';
                 result.certainty = 10;
-                console.log(`无法识别交易类型: ${tx.hash}`);
                 return result;
             }
             
@@ -1731,28 +1680,80 @@
             function estimateTransactionValue(tx, gasCost, type) {
                 const gasUsed = parseFloat(tx.gasUsed) || 0;
                 const gasFee = parseFloat(gasCost) || 0;
-                let estimatedValue;
                 
-                // 基于gas费用估算
-                if (gasFee > 0) {
-                    // 买入和卖出交易的估算倍数可能不同
-                    const multiplier = type === 'sell' 
-                        ? (gasUsed > 500000 ? 50 : gasUsed > 200000 ? 30 : 20)
-                        : (gasUsed > 500000 ? 40 : gasUsed > 200000 ? 25 : 15);
-                    
-                    estimatedValue = gasFee * multiplier;
-                } 
-                // 回退到基于gas使用量的估算
-                else {
-                    const divisor = type === 'sell'
-                        ? (gasUsed > 500000 ? 2e6 : gasUsed > 200000 ? 3e6 : 4e6)
-                        : (gasUsed > 500000 ? 2.5e6 : gasUsed > 200000 ? 3.5e6 : 5e6);
-                    
+                // 基于交易复杂度的动态估算
+                let multiplier;
+                if (gasUsed > 1000000) {
+                    multiplier = type === 'sell' ? 60 : 50;
+                } else if (gasUsed > 500000) {
+                    multiplier = type === 'sell' ? 45 : 35;
+                } else if (gasUsed > 200000) {
+                    multiplier = type === 'sell' ? 30 : 25;
+                } else {
+                    multiplier = type === 'sell' ? 20 : 15;
+                }
+                
+                // 使用gas费用和交易复杂度来估算
+                let estimatedValue = gasFee * multiplier;
+                
+                // 如果gas费用计算结果不可用，使用gas使用量来估算
+                if (estimatedValue <= 0 || !isFinite(estimatedValue)) {
+                    const divisor = gasUsed > 500000 ? 1e6 : 2e6;
                     estimatedValue = gasUsed / divisor;
                 }
                 
-                // 确保值是有效的
-                return isFinite(estimatedValue) && estimatedValue > 0 ? estimatedValue : gasUsed / 5e6;
+                console.log(`[${tx.hash}] 交易估值计算:`, {
+                    gasUsed,
+                    gasFee,
+                    multiplier,
+                    estimatedValue,
+                    type
+                });
+                
+                return estimatedValue;
+            }
+
+            // 计算北京时间8点的UTC时间戳
+            function getBeijing8Timestamp(date) {
+                // date为Date对象
+                const bjDate = new Date(date);
+                bjDate.setHours(8, 0, 0, 0); // 先设为本地8点
+                // 减去8小时，得到UTC时间戳
+                return Math.floor((bjDate.getTime() - 8 * 3600 * 1000) / 1000);
+            }
+
+            // 添加查询历史余额的函数
+            async function getHistoricalBalance(address, timestamp) {
+                try {
+                    const web3 = new Web3('https://bsc-dataseed.binance.org/');
+                    
+                    // 获取指定时间戳对应的区块号
+                    const url = `https://api.bscscan.com/api?module=block&action=getblocknobytime&timestamp=${timestamp}&closest=before&apikey=${getRandomApiKey()}`;
+                    const response = await fetch(url);
+                    const data = await response.json();
+                    
+                    if (data.status === '1' && data.result) {
+                        const blockNumber = parseInt(data.result);
+                        console.log(`🔍 时间戳 ${new Date(timestamp * 1000).toLocaleString()} 对应的区块号: ${blockNumber}`);
+                        
+                        // 获取该区块的余额
+                        const balance = await web3.eth.getBalance(address, blockNumber);
+                        const bnbBalance = web3.utils.fromWei(balance, 'ether');
+                        console.log(`💰 地址 ${address} 在区块 ${blockNumber} 的BNB余额: ${bnbBalance} BNB`);
+                        
+                        return {
+                            timestamp,
+                            blockNumber,
+                            balance: bnbBalance,
+                            date: new Date(timestamp * 1000).toLocaleString()
+                        };
+                    } else {
+                        throw new Error(`获取区块号失败: ${data.message || '未知错误'}`);
+                    }
+                } catch (error) {
+                    console.error('查询历史余额失败:', error);
+                    throw error;
+                }
             }
         });
     </script>
