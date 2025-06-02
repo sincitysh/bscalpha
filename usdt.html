@@ -321,9 +321,9 @@
                 
                 // 计算开始区块号 (当前区块号往前推1天的区块)
                 // BSC出块时间约3秒，1天约28800个区块
-                const startBlock = Math.max(0, latestBlock - 28800);
+                const startBlock = Math.max(0, latestBlock - 48800);
                 // 结束区块号使用最新区块号往后加1000个区块，以防止漏掉最新的交易
-                const endBlock = latestBlock + 28800;
+                const endBlock = latestBlock + 48800;
                 
                 console.log(`📦 计算得到区块范围: ${startBlock} - ${endBlock} (约1天数据)`);
                 return { startBlock, endBlock };
